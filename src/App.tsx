@@ -151,7 +151,10 @@ function parseUploadedCSV(text: string): { transactions: Transaction[] } {
     const usd = parseCurrency(usdStr);
     const rmb = parseCurrency(rmbStr);
     const rate = parseFloat(rateStr) || 1.0;
-    const total = parseCurrency(totalStr);
+    let total = parseCurrency(totalStr);
+    if (total === 0 && (usd !== 0 || rmb !== 0)) {
+      total = Math.round((usd * rate + rmb) * 100) / 100;
+    }
 
     const isNegative = usdStr.includes('-') || rmbStr.includes('-') || totalStr.includes('-') || line.includes('-$') || line.includes('-¥') || line.includes('-“¥');
 

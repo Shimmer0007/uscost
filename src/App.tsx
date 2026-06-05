@@ -1630,6 +1630,25 @@ export default function App() {
             </div>
           </>
         )}
+
+        {/* Main Footer Copyright Notice */}
+        <footer style={{ 
+          marginTop: '3rem', 
+          paddingTop: '1.5rem', 
+          borderTop: '1px solid var(--border-color)', 
+          textAlign: 'center', 
+          fontSize: '0.8rem', 
+          color: 'var(--text-muted)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '0.5rem',
+          alignItems: 'center'
+        }}>
+          <p style={{ fontWeight: 600 }}>© 2026 Shimmer. All Rights Reserved. (版权属 Shimmer 所有)</p>
+          <p style={{ maxWidth: '600px', lineHeight: '1.5', margin: '0 auto', fontSize: '0.75rem' }}>
+            提示：本项目的软件结构与分析工具代码基于 MIT 协议开源；但所附带的<strong>留学账单数据集（演示数据）版权专有</strong>，未经 Shimmer 授权，禁止任何第三方进行商业化传播、公开发布或用作其他商业用途。
+          </p>
+        </footer>
       </main>
     </div>
   );

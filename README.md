@@ -1,73 +1,63 @@
-# React + TypeScript + Vite
+# 📊 CostAnalytics - 留学记账数据挖掘与可视化仪表板
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+> 一个专为留学生量身定制的、高颜值且支持本地账单脱机分析的开源记账可视化仪表板。  
+> **Copyright © 2026 Shimmer. All Rights Reserved. (版权属 Shimmer 所有)**
 
-Currently, two official plugins are available:
+---
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## ✨ 项目特色 (Key Features)
 
-## React Compiler
+* **💼 五维核心账目分析**：一键归纳原始开支（Gross）、他人均摊回款/退款、个人净生活开支（Net）、学费总和以及助学金/TA工资等资产流入，还原最真实的账目对账单。
+* **📈 月度趋势 & 汇率流动图**：以复合面积/折线图展示月度资金流动，并绘制美元兑人民币汇率在 7.22 至 6.80 之间的波动影响。
+* **📊 权责发生制 (账期对齐) 模式**：内置智能匹配，自动将月底提前支付或月初推迟交纳的房租、能耗账单归入对应的真实账期月，抹平因支付日期产生的人工数据波动。
+* **📂 100% 浏览器脱机分析 (自定义上传)**：支持上传符合规范的 CSV 账单。数据完全在前端解析并生成图表，不上传任何服务器，保护您的隐私。
+* **🍔 麦当劳指数 (McDonald's Index)**：趣味性数据挖掘，深度统计留学期间吃麦当劳的频次、均价和总额。
+* **🛒 超市争霸赛 (Groceries Battle)**：横向对比 Kroger、Weee、Oasis 和 Walmart 的消费频次与金额。
+* **🌴 旅行对账专题**：针对大型团队出游（如春假行、毕业旅行等），自动计算个人垫付金额、均摊回款与个人真实旅行成本。
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+---
 
-## Expanding the ESLint configuration
+## 🚀 快速上手 (Quick Start)
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+### 1. 克隆与安装依赖
+```bash
+git clone https://github.com/Shimmer0007/uscost.git
+cd uscost
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+### 2. 启动开发服务器
+```bash
+npm run dev
 ```
+启动后在浏览器打开 `http://localhost:5173/` 即可。
+
+### 3. 一键部署至 GitHub Pages
+```bash
+npm run deploy
+```
+
+---
+
+## 📋 自定义账单 CSV 格式规范 (CSV Template Specification)
+
+当您在页面中使用 **“上传 CSV 账单”** 进行本地分析时，您的 CSV 文件需遵循以下列格式，列顺序与表头需与下表一致（您也可以直接在网页侧边栏下载标准的模板）：
+
+| 日期 | 美元 | 人民币 | 月均汇率 | 合计 | 备注 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 2025/8/9 | $20,958.50 | | 7.17 | ¥151,272.45 | 25-26 Fall学费 |
+| 2025/9/8 | $552.28 | | 7.12 | ¥3,932.23 | 9-10月房租 |
+| 2025/11/6 | | ¥512.53 | 7.11 | ¥512.53 | Weee采购 |
+| 2026/1/16 | -$42.70 | | 6.97 | -¥297.62 | TA工资 |
+
+*注：*
+* 表头行（第一行）不可省略。
+* 汇总行（如有）必须将“日期”列标记为 `-`（例如第二行），系统会自动将其排除以防重复统计。
+* 负号 `-` 代表回款、退款、工资、奖学金等资金流入（Credit/Inflow）。
+
+---
+
+## 📜 版权声明 (License & Copyright)
+
+* 本项目源码、设计与数据分析模型版权归 **Shimmer** (GitHub [@Shimmer0007](https://github.com/Shimmer0007)) 所有。
+* 源码基于 **MIT License** 开源，您可以自由分发、修改和复用，但必须保留原作者的版权声明及署名。

@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef } from 'react';
 import {
   TrendingUp,
   Coffee,
@@ -13,7 +13,10 @@ import {
   Info,
   Award,
   Zap,
-  Home
+  Home,
+  Upload,
+  RefreshCw,
+  Download
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -63,10 +66,242 @@ const CATEGORY_COLORS: Record<string, string> = {
   '杂项支出': '#64748b'  // Slate
 };
 
+// Top-Level Helpers to avoid hoisting / scope errors
+const formatRMB = (val: number) => {
+  return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 0 }).format(val);
+};
+
+const formatUSD = (val: number) => {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(val);
+};
+
+const getTargetMonth = (t: Transaction, mode: 'cash' | 'accrual'): string => {
+  const normDate = t.date.replace(/\//g, '-');
+  if (mode === 'cash') {
+    return normDate.substring(0, 7); // YYYY-MM
+  }
+  
+  if (t.category === '居住开销') {
+    const match = t.remark.match(/(\d+)-(\d+)月|(\d+)月/);
+    if (match) {
+      const targetMonthNum = parseInt(match[1] || match[3], 10);
+      const txDateParts = normDate.split('-');
+      const txYear = parseInt(txDateParts[0], 10);
+      const txMonth = parseInt(txDateParts[1], 10);
+      
+      let targetYear = txYear;
+      if (txMonth === 12 && targetMonthNum === 1) {
+        targetYear = txYear + 1;
+      } else if (txMonth === 1 && targetMonthNum === 12) {
+        targetYear = txYear - 1;
+      }
+      
+      const padMonth = String(targetMonthNum).padStart(2, '0');
+      return `${targetYear}-${padMonth}`;
+    }
+  }
+  
+  return normDate.substring(0, 7);
+};
+
+// Frontend CSV Parser
+function parseUploadedCSV(text: string): { transactions: Transaction[] } {
+  const lines = text.split(/\r?\n/);
+  const transactions: Transaction[] = [];
+  let idCounter = 1;
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    const cells: string[] = [];
+    let currentCell = '';
+    let inQuotes = false;
+    for (let charIdx = 0; charIdx < line.length; charIdx++) {
+      const char = line[charIdx];
+      if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === ',' && !inQuotes) {
+        cells.push(currentCell.trim());
+        currentCell = '';
+      } else {
+        currentCell += char;
+      }
+    }
+    cells.push(currentCell.trim());
+
+    if (cells.length < 6) continue;
+
+    const dateStr = cells[0];
+    const usdStr = cells[1];
+    const rmbStr = cells[2];
+    const rateStr = cells[3];
+    const totalStr = cells[4];
+    const remark = cells[5] || '';
+
+    const parseCurrency = (val: string) => {
+      if (!val) return 0;
+      let clean = val.replace(/[\$¥￥\s,""()（）]/g, '');
+      if (!clean || clean === '-') return 0;
+      return parseFloat(clean);
+    };
+
+    if (!dateStr || dateStr === '日期' || dateStr === '-') continue;
+
+    const usd = parseCurrency(usdStr);
+    const rmb = parseCurrency(rmbStr);
+    const rate = parseFloat(rateStr) || 1.0;
+    const total = parseCurrency(totalStr);
+
+    const isNegative = usdStr.includes('-') || rmbStr.includes('-') || totalStr.includes('-') || line.includes('-$') || line.includes('-¥') || line.includes('-“¥');
+
+    let category = '其他';
+    let subCategory = '其他';
+    let isIncome = false;
+    let isReimbursement = false;
+    let isTransfer = false;
+
+    const remarkLower = remark.toLowerCase();
+
+    if (remark.includes('跨境汇款') || remark.includes('收汇')) {
+      isTransfer = true;
+      category = '账户划转';
+      subCategory = remark.includes('跨境汇款') ? '汇出资金' : '收到汇款';
+    } 
+    else if (isNegative) {
+      if (remark.includes('工资') || remark.includes('奖学金') || remark.includes('返现') || remark.includes('Discover返现') || remark.includes('Wells Fargo返现')) {
+        isIncome = true;
+        category = '收入';
+        if (remark.includes('工资') || remark.includes('TA')) {
+          subCategory = 'TA工资';
+        } else if (remark.includes('奖学金')) {
+          subCategory = '奖学金';
+        } else {
+          subCategory = '返现奖励';
+        }
+      } else {
+        isReimbursement = true;
+        category = '回款与退款';
+        if (remark.includes('退款') || remark.includes('退货')) {
+          subCategory = '退货退款';
+        } else {
+          subCategory = '均摊回款';
+        }
+      }
+    } 
+    else {
+      if (/房租|电费|网费|押金|aep|rent|utility|network/i.test(remarkLower)) {
+        category = '居住开销';
+        if (remark.includes('房租')) subCategory = '房租';
+        else if (remark.includes('电费') || remark.includes('AEP')) subCategory = '电费';
+        else if (remark.includes('网费') || remark.includes('Network')) subCategory = '网费';
+        else subCategory = '押金/中介费';
+      } else if (/学费|教材|书|课程|案例包|学士服|成绩单|签证|sevis|evus|goventure|考试|驾考|dmv/i.test(remarkLower)) {
+        category = '学业与学杂费';
+        if (remark.includes('学费')) subCategory = '学费';
+        else if (remark.includes('案例包') || remark.includes('书') || remark.includes('教材')) subCategory = '学习资料';
+        else if (remark.includes('签证') || remark.includes('SEVIS') || remark.includes('EVUS')) subCategory = '签证相关';
+        else if (remark.includes('成绩单')) subCategory = '成绩单';
+        else subCategory = '考试与认证';
+      } else if (/采购|kroger|weee|oasis|walmart|dollar tree|tjmaxx|生鲜|油|香皂|洗洁精/i.test(remarkLower)) {
+        category = '超市采购';
+        if (remark.includes('Kroger')) subCategory = 'Kroger';
+        else if (remark.includes('Weee')) subCategory = 'Weee';
+        else if (remark.includes('Oasis')) subCategory = 'Oasis';
+        else if (remark.includes('Walmart')) subCategory = 'Walmart';
+        else subCategory = '其他超市/百货';
+      } else if (/麦当劳|wendy|chipotle|披萨|benny|火锅|日料|subway|点单|mami house|applebees|jersey|canes|owens|早餐|panda express|pizza|rex|涮锅|血亏|三明治|面/i.test(remarkLower)) {
+        category = '餐饮美食';
+        if (remark.includes('麦当劳')) subCategory = '麦当劳';
+        else if (remark.includes('火锅') || remark.includes('涮锅')) subCategory = '火锅';
+        else if (remark.includes('Chipotle') || remark.includes('Subway') || remark.includes('Wendy') || remark.includes('Panda Express')) subCategory = '快餐美式';
+        else subCategory = '餐馆聚餐';
+      } else if (/机票|酒店|车票|租车|加油|地铁|amtrak|车费|航意险|延意险|门票|春假|day|潜艇|庄园|灯塔|rdu|roa|exxon|kenly|amoco|chevron|enterprise|打车|uber|燃油|出行/i.test(remarkLower)) {
+        category = '交通与旅行';
+        if (remark.includes('机票') || remark.includes('航意险') || remark.includes('延意险')) subCategory = '机票';
+        else if (remark.includes('酒店')) subCategory = '酒店住宿';
+        else if (remark.includes('车票') || remark.includes('Amtrak') || remark.includes('车费') || remark.includes('地铁')) subCategory = '大巴/火车/地铁';
+        else if (remark.includes('租车') || remark.includes('Enterprise')) subCategory = '租车服务';
+        else if (remark.includes('加油') || remark.includes('Exxon') || remark.includes('Kenly') || remark.includes('Amoco') || remark.includes('Chevron') || remark.includes('燃油')) subCategory = '汽车加油';
+        else if (remark.includes('Uber') || remark.includes('打车')) subCategory = '打车/网约车';
+        else subCategory = '景点门票';
+      } else if (/医保|药|cvs|医疗|账单|insurance/i.test(remarkLower)) {
+        category = '医疗健康';
+        if (remark.includes('医保')) subCategory = '医疗保险';
+        else if (remark.includes('药') || remark.includes('CVS')) subCategory = '药品医疗';
+        else subCategory = '医疗账单';
+      } else if (/话费|移动|us-mobile|us mobile|新增号/i.test(remarkLower)) {
+        category = '通信话费';
+        subCategory = '手机话费';
+      } else if (/锅|餐桌|书桌|床架|床垫|枕芯|毯|洗洁精|洗衣机/i.test(remarkLower)) {
+        category = '家居与电器';
+        subCategory = '家具与生活电器';
+      } else if (/寄件|报税|自动售货机|reese|oreo|lemonade|保险/i.test(remarkLower)) {
+        category = '杂项支出';
+        subCategory = '杂项';
+      }
+    }
+
+    let event: string | null = null;
+    const parseDateString = (dStr: string) => {
+      const parts = dStr.split('/');
+      if (parts.length === 3) {
+        const y = parseInt(parts[0], 10);
+        const m = parseInt(parts[1], 10);
+        const d = parseInt(parts[2], 10);
+        return new Date(y, m - 1, d);
+      }
+      return null;
+    };
+    const txDate = parseDateString(dateStr);
+    if (txDate) {
+      const isSpringBreak = txDate >= new Date(2026, 2, 7) && txDate <= new Date(2026, 2, 19);
+      const isEastCoastTrip = txDate >= new Date(2025, 10, 20) && txDate <= new Date(2025, 10, 27);
+      const isGraduationTrip = txDate >= new Date(2026, 4, 16) && txDate <= new Date(2026, 4, 25);
+
+      if (remark.includes('春假') || (isSpringBreak && !remark.includes('房租') && !remark.includes('电费') && !remark.includes('TA工资'))) {
+        event = '2026春假佛罗里达行';
+      } else if (remark.includes('美东出行') || (isEastCoastTrip && !remark.includes('学费') && !remark.includes('房租') && !remark.includes('奖学金'))) {
+        event = '2025美东纽约感恩节出行';
+      } else if (remark.includes('南部-华盛顿') || (isGraduationTrip && !remark.includes('学费') && !remark.includes('房租') && !remark.includes('工资') && !remark.includes('奖学金'))) {
+        event = '2026毕业旅行(南部-华盛顿)';
+      }
+    }
+
+    const signedTotal = isNegative ? -Math.abs(total) : Math.abs(total);
+    const signedUsd = isNegative ? -Math.abs(usd) : Math.abs(usd);
+    const signedRmb = isNegative ? -Math.abs(rmb) : Math.abs(rmb);
+
+    transactions.push({
+      id: idCounter++,
+      date: dateStr,
+      usd: signedUsd,
+      rmb: signedRmb,
+      rate: rate,
+      total: signedTotal,
+      remark: remark,
+      category,
+      subCategory,
+      isIncome,
+      isReimbursement,
+      isTransfer,
+      event
+    });
+  }
+
+  return { transactions };
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'transactions' | 'mcdonalds' | 'groceries' | 'travel' | 'recovery' | 'utilities' | 'settlement'>('dashboard');
   const [excludeMajors, setExcludeMajors] = useState(true);
   const [accountingMode, setAccountingMode] = useState<'cash' | 'accrual'>('accrual');
+  
+  // Custom Data Upload states
+  const [customData, setCustomData] = useState<{ transactions: Transaction[] } | null>(null);
+  const [isUsingCustom, setIsUsingCustom] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
@@ -76,9 +311,62 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 15;
 
-  const rawTransactions = costData.transactions as Transaction[];
+  const rawTransactions = useMemo(() => {
+    return isUsingCustom && customData ? customData.transactions : (costData.transactions as Transaction[]);
+  }, [isUsingCustom, customData]);
 
-  // 1. Basic Stats Calculation
+  // Handle local CSV upload
+  const handleCSVUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      try {
+        const parsed = parseUploadedCSV(text);
+        if (parsed.transactions.length > 0) {
+          setCustomData(parsed);
+          setIsUsingCustom(true);
+          setActiveTab('dashboard');
+        } else {
+          alert('CSV格式不正确或无有效数据，请检查模板！');
+        }
+      } catch (err) {
+        alert('解析失败，请确保上传了正确的CSV格式记账账单。');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleResetData = () => {
+    setIsUsingCustom(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleDownloadTemplate = () => {
+    const headers = '日期,美元,人民币,月均汇率,合计,备注\n';
+    const rows = [
+      '-,$58,785.66,$44,426.83,（$1兑￥1）,$459,872.79,汇总行(可选)\n',
+      '2025/5/16,$350.00,,7.22,$2527.00,签证SEVIS-901材料费\n',
+      '2025/5/16,,¥6211.00,7.22,¥6211.00,北京-迪拜-华盛顿机票+航空意外险\n',
+      '2025/8/9,$20,958.50,¥1,000.00,7.17,¥151272.45,25-26 Fall学费\n',
+      '2025/8/26,$4.27,,7.17,¥30.62,麦当劳点单\n',
+      '2025/9/8,$552.28,,7.12,¥3932.23,9-10月房租\n',
+      '2026/1/16,-$42.70,,6.97,-¥297.62,TA工资\n'
+    ];
+    const blob = new Blob([headers + rows.join('')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'cost_template.csv');
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Stats Calculation
   const stats = useMemo(() => {
     let grossExpensesRmb = 0;
     let totalIncomeRmb = 0;
@@ -100,10 +388,13 @@ export default function App() {
         totalTuitionRmb += Math.abs(t.total);
       }
       if (t.isIncome) {
+        // TA wages, scholarships, cashback are positive incomes (sign in CSV is negative, meaning credit)
         totalIncomeRmb += Math.abs(t.total);
       } else if (t.isReimbursement) {
+        // Split bills, refunds are positive reimbursements (offsetting costs)
         totalReimbursementRmb += Math.abs(t.total);
       } else {
+        // Direct expense
         grossExpensesRmb += Math.abs(t.total);
       }
     });
@@ -121,7 +412,6 @@ export default function App() {
         dailyLivingCostsRmb += Math.abs(t.total);
       }
     });
-    // Add transfer loss to daily living costs as it is a real loss
     dailyLivingCostsRmb += transferLoss;
 
     return {
@@ -137,39 +427,7 @@ export default function App() {
     };
   }, [rawTransactions]);
 
-  // Helper to determine target month based on accounting mode (Cash vs Accrual)
-  const getTargetMonth = (t: Transaction, mode: 'cash' | 'accrual'): string => {
-    const normDate = t.date.replace(/\//g, '-');
-    if (mode === 'cash') {
-      return normDate.substring(0, 7); // YYYY-MM
-    }
-    
-    // Accrual mode: look for target month in remark for rent, utilities, internet
-    if (t.category === '居住开销') {
-      const match = t.remark.match(/(\d+)-(\d+)月|(\d+)月/);
-      if (match) {
-        const targetMonthNum = parseInt(match[1] || match[3]);
-        const txDateParts = normDate.split('-');
-        const txYear = parseInt(txDateParts[0]);
-        const txMonth = parseInt(txDateParts[1]);
-        
-        let targetYear = txYear;
-        // Handle year boundaries (e.g. paying Dec rent in Jan, or Jan rent in Dec)
-        if (txMonth === 12 && targetMonthNum === 1) {
-          targetYear = txYear + 1;
-        } else if (txMonth === 1 && targetMonthNum === 12) {
-          targetYear = txYear - 1;
-        }
-        
-        const padMonth = String(targetMonthNum).padStart(2, '0');
-        return `${targetYear}-${padMonth}`;
-      }
-    }
-    
-    return normDate.substring(0, 7);
-  };
-
-  // 2. Monthly Trends Area Chart
+  // Monthly Trends Area Chart
   const monthlyTrendData = useMemo(() => {
     const monthsData: Record<string, { month: string; expense: number; income: number; rate: number; rateCount: number }> = {};
     
@@ -209,7 +467,7 @@ export default function App() {
       });
   }, [rawTransactions, excludeMajors, accountingMode]);
 
-  // 3. Category Aggregates for Pie Chart
+  // Category Aggregates for Pie Chart
   const categoryChartData = useMemo(() => {
     const aggregates: Record<string, number> = {};
     rawTransactions.forEach(t => {
@@ -220,7 +478,7 @@ export default function App() {
       }
     });
 
-    // Add exchange loss to '杂项支出'
+    // Extract transfer/exchange loss if any and attribute it to '杂项支出' so the chart balances
     let transferOut = 0;
     let transferIn = 0;
     rawTransactions.forEach(t => {
@@ -239,7 +497,7 @@ export default function App() {
       .sort((a, b) => b.value - a.value);
   }, [rawTransactions, excludeMajors]);
 
-  // 4. McDonald's Specific Metrics
+  // McDonald's Specific Metrics
   const mcdStats = useMemo(() => {
     const mcdTrans = rawTransactions.filter(t => t.remark.includes('麦当劳'));
     const count = mcdTrans.length;
@@ -265,7 +523,7 @@ export default function App() {
     };
   }, [rawTransactions]);
 
-  // 5. Grocery stores metrics
+  // Grocery stores metrics
   const groceryStats = useMemo(() => {
     const stores = [
       { name: 'Kroger (美式商超)', keywords: ['kroger', 'Kroger'] },
@@ -290,7 +548,7 @@ export default function App() {
     return result.sort((a, b) => b.amount - a.amount);
   }, [rawTransactions]);
 
-  // 6. Travel Events Metrics
+  // Travel Events Metrics
   const travelStats = useMemo(() => {
     const events = [
       { id: '2025美东纽约感恩节出行', label: '2025 美东感恩节纽约行 (4人)', dates: '11/20 - 11/27' },
@@ -323,17 +581,15 @@ export default function App() {
     });
   }, [rawTransactions]);
 
-  // 7. Income & Recovery Ratio Metrics (回血率)
+  // Income & Recovery Ratio Metrics
   const recoveryStats = useMemo(() => {
     const taWages = rawTransactions.filter(t => t.subCategory === 'TA工资').reduce((sum, t) => sum + Math.abs(t.total), 0);
     const scholarships = rawTransactions.filter(t => t.subCategory === '奖学金').reduce((sum, t) => sum + Math.abs(t.total), 0);
     const cashbacks = rawTransactions.filter(t => t.subCategory === '返现奖励').reduce((sum, t) => sum + Math.abs(t.total), 0);
     
-    // Living costs net of reimbursements
     const livingCost = stats.netDailyLivingCostsRmb;
     const recoveryRatio = livingCost > 0 ? ((taWages + scholarships + cashbacks) / livingCost) * 100 : 0;
 
-    // Monthly income data for chart
     const monthlyIncomeData: Record<string, { month: string; wages: number; scholarship: number; cashback: number }> = {};
     rawTransactions.forEach(t => {
       if (!t.isIncome || !t.date || t.date === '-') return;
@@ -362,7 +618,7 @@ export default function App() {
     };
   }, [rawTransactions, stats]);
 
-  // 8. Utilities Seasonal Variance (能耗温控)
+  // Utilities Seasonal Variance
   const utilitiesStats = useMemo(() => {
     const electricTrans = rawTransactions.filter(t => t.subCategory === '电费');
     const internetTrans = rawTransactions.filter(t => t.subCategory === '网费');
@@ -371,7 +627,7 @@ export default function App() {
     const monthlyUtilities: Record<string, { month: string; electric: number; internet: number; phone: number }> = {};
 
     electricTrans.forEach(t => {
-      const month = getTargetMonth(t, 'accrual'); // align to billing target month
+      const month = getTargetMonth(t, 'accrual');
       if (!monthlyUtilities[month]) monthlyUtilities[month] = { month, electric: 0, internet: 0, phone: 0 };
       monthlyUtilities[month].electric += Math.abs(t.total);
     });
@@ -383,7 +639,7 @@ export default function App() {
     });
 
     phoneTrans.forEach(t => {
-      const month = t.date.substring(0, 7).replace('/', '-'); // Phone is simple monthly
+      const month = t.date.substring(0, 7).replace('/', '-');
       if (!monthlyUtilities[month]) monthlyUtilities[month] = { month, electric: 0, internet: 0, phone: 0 };
       monthlyUtilities[month].phone += Math.abs(t.total);
     });
@@ -398,15 +654,13 @@ export default function App() {
     };
   }, [rawTransactions]);
 
-  // 9. Settlement & Academic Setup Costs (安家与学业装备)
+  // Settlement Setup Costs
   const setupStats = useMemo(() => {
-    // Things bought to set up the room/kitchen
     const setupItems = rawTransactions.filter(t => 
       /书桌|床架|床垫|多功能锅|圆形餐桌|枕芯|法兰绒毯|自提洗衣机|碗|洗洁精|香皂/.test(t.remark) && !t.remark.includes('退款')
     );
     const setupTotal = setupItems.reduce((sum, t) => sum + Math.abs(t.total), 0);
 
-    // Academic setup items (Visa, transcripts, case packs, text books, grad gown, evus)
     const academicItems = rawTransactions.filter(t => 
       /签证|SEVIS|教材|案例包|成绩单|EVUS|学士服|课程|报名费|驾考|DMV/.test(t.remark) && !t.isIncome
     );
@@ -420,7 +674,6 @@ export default function App() {
     };
   }, [rawTransactions]);
 
-  // Filter & Sort Table Transactions
   const filteredTransactions = useMemo(() => {
     let result = [...rawTransactions];
 
@@ -476,14 +729,6 @@ export default function App() {
 
   const totalPages = Math.ceil(filteredTransactions.length / itemsPerPage);
 
-  const formatRMB = (val: number) => {
-    return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 0 }).format(val);
-  };
-
-  const formatUSD = (val: number) => {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(val);
-  };
-
   return (
     <div className="app-container">
       {/* Sidebar */}
@@ -494,8 +739,48 @@ export default function App() {
           </div>
           <span className="brand-name">CostAnalytics</span>
         </div>
+
+        {/* Local CSV Custom Upload Panel */}
+        <div style={{ backgroundColor: 'var(--border-light)', padding: '1rem', borderRadius: 'var(--radius-md)', display: 'flex', flexDirection: 'column', gap: '0.75rem', fontSize: '0.85rem' }}>
+          <span style={{ fontWeight: 700, color: 'var(--text-secondary)' }}>📊 分析我的记账账单</span>
+          
+          <input
+            type="file"
+            accept=".csv"
+            onChange={handleCSVUpload}
+            ref={fileInputRef}
+            style={{ display: 'none' }}
+            id="csv-file-upload"
+          />
+
+          {!isUsingCustom ? (
+            <label 
+              htmlFor="csv-file-upload" 
+              className="select-filter" 
+              style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', cursor: 'pointer', backgroundColor: 'var(--primary)', color: 'white', border: 'none', fontWeight: 600, padding: '0.5rem' }}
+            >
+              <Upload size={16} /> 上传 CSV 账单
+            </label>
+          ) : (
+            <button 
+              onClick={handleResetData}
+              className="select-filter"
+              style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', backgroundColor: 'var(--danger-light)', color: 'var(--danger)', border: '1px solid var(--danger)', fontWeight: 600, padding: '0.5rem' }}
+            >
+              <RefreshCw size={16} /> 恢复演示数据
+            </button>
+          )}
+
+          <button 
+            onClick={handleDownloadTemplate}
+            className="select-filter"
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', border: '1px solid var(--border-color)', padding: '0.5rem', backgroundColor: 'var(--bg-card)' }}
+          >
+            <Download size={14} /> 下载记账模版
+          </button>
+        </div>
         
-        <ul className="nav-list">
+        <ul className="nav-list" style={{ flexGrow: 1 }}>
           <li 
             className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`}
             onClick={() => setActiveTab('dashboard')}
@@ -548,6 +833,12 @@ export default function App() {
             <Plane /> 旅行专题分析
           </li>
         </ul>
+
+        {/* Footer Credit & Copyright */}
+        <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '1rem', fontSize: '0.75rem', color: 'var(--text-muted)', textAlign: 'center', lineHeight: '1.4' }}>
+          <p>© 2026 Shimmer. All Rights Reserved.</p>
+          <p style={{ marginTop: '0.25rem' }}>Designed by Shimmer0007</p>
+        </div>
       </aside>
 
       {/* Main Content */}
@@ -556,10 +847,11 @@ export default function App() {
         <div className="dashboard-header">
           <div className="header-title">
             <h1>留学开销与收入数据挖掘</h1>
-            <p>基于 2025.05 - 2026.05 期间留学账本的多维度统计与分析</p>
+            <p>基于 {isUsingCustom ? '您上传的自定义' : '2025.05 - 2026.05 期间留学'}账本的多维度统计与分析</p>
           </div>
-          <div className="badge badge-event" style={{ fontSize: '0.85rem', padding: '0.4rem 1rem' }}>
-            数据量：{rawTransactions.length} 笔记录
+          <div className="badge badge-event" style={{ fontSize: '0.85rem', padding: '0.4rem 1rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            {isUsingCustom && <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--success)' }}></span>}
+            数据源：{isUsingCustom ? '自定义账单' : '演示数据'} ({rawTransactions.length} 条)
           </div>
         </div>
 
@@ -613,7 +905,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="stat-value">{formatRMB(stats.grossExpensesRmb)}</div>
-                <div className="stat-desc">包含他人垫付与汇兑折损损失</div>
+                <div className="stat-desc">包含他人等额外垫付与汇兑折损</div>
               </div>
 
               <div className="stat-card">
@@ -624,7 +916,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="stat-value" style={{ color: 'var(--info)' }}>{formatRMB(stats.totalReimbursementRmb)}</div>
-                <div className="stat-desc">剔除回赠与回款干扰</div>
+                <div className="stat-desc">剔除回赠与均摊干扰</div>
               </div>
 
               <div className="stat-card">
@@ -635,7 +927,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="stat-value" style={{ color: 'var(--primary)' }}>{formatRMB(stats.netExpensesRmb)}</div>
-                <div className="stat-desc">个人真实生活与学习开销</div>
+                <div className="stat-desc">个人真实生活与学习总开销</div>
               </div>
 
               <div className="stat-card">
@@ -646,7 +938,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="stat-value" style={{ color: 'var(--study-color)' }}>{formatRMB(stats.totalTuitionRmb)}</div>
-                <div className="stat-desc">25-26学年三学期学费总和</div>
+                <div className="stat-desc">学费栏目关联总开销</div>
               </div>
 
               <div className="stat-card">
@@ -657,7 +949,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="stat-value" style={{ color: 'var(--success)' }}>{formatRMB(stats.totalIncomeRmb)}</div>
-                <div className="stat-desc">TA助研工资 + 奖学金 + 返现</div>
+                <div className="stat-desc">TA助研工资 + 各项奖学金总和</div>
               </div>
             </div>
 
@@ -753,14 +1045,16 @@ export default function App() {
               </div>
               <div style={{ fontSize: '0.95rem', display: 'flex', flexDirection: 'column', gap: '1rem', color: 'var(--text-secondary)' }}>
                 <p>
-                  🎓 <strong>学业相关支出占比巨大：</strong> 在一整年的账单中，<strong>学费与学杂费</strong>（共计三学期，秋季/冬季/春季）占领了总开支的半壁江山。
+                  🎓 <strong>学业开支与支出比例：</strong> 账本中<strong>学费与学杂费</strong>是大宗固定资产性投入，其余日常开销比例较为均匀。
                 </p>
                 <p>
-                  💰 <strong>收支对冲模型：</strong> 虽然总开支达到了惊人的 <strong>{formatRMB(stats.grossExpensesRmb)}</strong>，但在回款了均摊资金 <strong>{formatRMB(stats.totalReimbursementRmb)}</strong>，并结合TA（助教）岗位工资与各项奖学金带来的 <strong>{formatRMB(stats.totalIncomeRmb)}</strong> 额外收益后，用户的<strong>真实净自付费用</strong>实际为 <span className="highlight-text">{formatRMB(stats.netExpensesRmb - stats.totalIncomeRmb)}</span> 人民币。
+                  💰 <strong>收支对冲模型：</strong> 结合TA工资、助学金与信用卡返现等 <strong>{formatRMB(stats.totalIncomeRmb)}</strong> 额外流向，真实自付负担被合理减轻。
                 </p>
-                <p>
-                  📉 <strong>汇率红利与转账损失：</strong> 汇率从 7.22 一路下降至 6.80，减轻了后期结汇压力。同时，数据清洗中发现您在跨境汇款与实际美元到账之间存在 <strong>{formatRMB(stats.transferLoss)}</strong> 的微弱汇兑折损与手续费。
-                </p>
+                {stats.transferLoss > 0 && (
+                  <p>
+                    📉 <strong>汇兑流失：</strong> 本次分析中自动计算并捕获了在跨境大额划拨中产生的汇兑手续费与损耗 <strong>{formatRMB(stats.transferLoss)}</strong>。
+                  </p>
+                )}
               </div>
             </div>
           </>
@@ -922,7 +1216,7 @@ export default function App() {
           </div>
         )}
 
-        {/* 1. Recovery Tracker Tab */}
+        {/* Recovery Tracker Tab */}
         {activeTab === 'recovery' && (
           <>
             <div className="insight-card travel animated-fade-in" style={{ background: 'linear-gradient(135deg, #ecfdf5, #ecfdf5)', border: '1px solid #a7f3d0' }}>
@@ -933,7 +1227,7 @@ export default function App() {
                 <h2 className="insight-title" style={{ color: 'var(--success)' }}>TA与奖学金“回血率”分析 (Financial Recovery)</h2>
               </div>
               <div className="insight-body">
-                分析您在留学期间如何通过自身的努力和消费返现来“抵消”日常的生活费开支：
+                分析在留学期间如何通过自身的努力和消费返现来“抵消”日常的生活费开支：
               </div>
               
               <div className="insight-metric-grid">
@@ -1008,7 +1302,7 @@ export default function App() {
           </>
         )}
 
-        {/* 2. Utilities Tab */}
+        {/* Utilities Tab */}
         {activeTab === 'utilities' && (
           <>
             <div className="insight-card travel animated-fade-in" style={{ background: 'linear-gradient(135deg, #ecfeff, #ecfeff)', border: '1px solid #a5f3fc' }}>
@@ -1019,7 +1313,7 @@ export default function App() {
                 <h2 className="insight-title" style={{ color: 'var(--info)' }}>能耗温控与通信分析 (Energy & Communications)</h2>
               </div>
               <div className="insight-body">
-                分析您的日常家庭基础开销，尤其是电费账单（AEP）与当地寒冷气候的关联：
+                分析日常家庭基础开销，尤其是电费账单（AEP）与当地寒冷气候的关联：
               </div>
               
               <div className="insight-metric-grid">
@@ -1032,7 +1326,7 @@ export default function App() {
                   <span className="insight-metric-val">{formatRMB(utilitiesStats.internetTotal)}</span>
                 </div>
                 <div className="insight-metric-item">
-                  <span className="insight-metric-label">电话通信总计</span>
+                  <span className="insight-metric-label">手机话费总计</span>
                   <span className="insight-metric-val">{formatRMB(utilitiesStats.phoneTotal)}</span>
                 </div>
               </div>
@@ -1065,10 +1359,10 @@ export default function App() {
                 </div>
                 <div style={{ fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', color: 'var(--text-secondary)' }}>
                   <p>
-                    ❄️ <strong>冬季取暖激增：</strong> 电费（AEP）在 <strong>12月至次年3月</strong> 期间有着极其显著的爬升，由秋季的 <strong>¥304</strong> 左右激增至高峰期的 <strong>¥608 / ¥514</strong> 级别。这与黑堡寒冷的冬季暖气加热能耗极其吻合。
+                    ❄️ <strong>冬季取暖激增：</strong> 电费（AEP）在 <strong>12月至次年3月</strong> 期间有着极其客观的爬升，代表黑堡高寒冬季的电暖消耗。
                   </p>
                   <p>
-                    🔌 <strong>春季平缓下滑：</strong> 随着 4 月和 5 月天气回暖，电费迅速滑落回 <strong>¥244</strong> 的低谷。
+                    🔌 <strong>春季平缓下滑：</strong> 随着 4 月和 5 月天气回暖，电费迅速滑落至低谷。
                   </p>
                 </div>
               </div>
@@ -1076,7 +1370,7 @@ export default function App() {
           </>
         )}
 
-        {/* 3. Settlement Tab */}
+        {/* Settlement Tab */}
         {activeTab === 'settlement' && (
           <>
             <div className="insight-card travel animated-fade-in" style={{ background: 'linear-gradient(135deg, #fffbeb, #fffbeb)', border: '1px solid #fde68a' }}>
@@ -1087,16 +1381,16 @@ export default function App() {
                 <h2 className="insight-title" style={{ color: '#b45309' }}>新居安家与学业配置成本 (Setup & Academic Cost)</h2>
               </div>
               <div className="insight-body">
-                展现初来乍到时，在购买家具、生活电器以及应对学校必不可少的行政管理/教材包方面的总投入：
+                展现初来乍到时，在购买新家家具、生活电器以及应对学校的行政管理/教材包方面的总投入：
               </div>
               
               <div className="insight-metric-grid">
                 <div className="insight-metric-item">
-                  <span className="insight-metric-label">安家与生活物资开销</span>
+                  <span className="insight-metric-label">安家安居物资总支出</span>
                   <span className="insight-metric-val" style={{ color: 'var(--primary)' }}>{formatRMB(setupStats.setupTotal)}</span>
                 </div>
                 <div className="insight-metric-item" style={{ gridColumn: 'span 2' }}>
-                  <span className="insight-metric-label">学杂费与学习辅助包 (除学费)</span>
+                  <span className="insight-metric-label">学杂资料配置总支出 (除学费)</span>
                   <span className="insight-metric-val" style={{ color: 'var(--info)' }}>{formatRMB(setupStats.academicTotal)}</span>
                 </div>
               </div>
@@ -1169,7 +1463,7 @@ export default function App() {
                 <h2 className="insight-title" style={{ color: '#b45309' }}>麦当劳挚爱指数 (McDonald's Index)</h2>
               </div>
               <div className="insight-body">
-                通过挖掘，我们发现您在美留学的一年内是<strong>麦当劳的超级狂热粉丝</strong>！这是您专属的麦当劳趣味统计：
+                展现账本中记录的麦当劳趣味统计：
               </div>
               
               <div className="insight-metric-grid">
@@ -1214,13 +1508,10 @@ export default function App() {
                 </div>
                 <div style={{ fontSize: '0.9rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', color: 'var(--text-secondary)' }}>
                   <p>
-                    🍔 <strong>最便宜的一单：</strong> 2025.12.24/2026.01.22 仅消费了 <strong>$1.66</strong> (麦当劳点单)。
+                    🍔 <strong>最便宜的一单：</strong> 消费了 <strong>$1.66</strong>。
                   </p>
                   <p>
-                    📅 <strong>全美芝士汉堡日：</strong> 2025.09.18 专门打卡了麦当劳的<strong>芝士汉堡节特惠</strong>，花费了 <strong>$2.99</strong>。
-                  </p>
-                  <p>
-                    📈 <strong>消费规律：</strong> 麦当劳大多发生在繁重的上课期间（例如 2026 年 1 月频次高达 6 次），作为快捷能量补给的首选。
+                    📅 <strong>全美芝士汉堡日：</strong> 2025.09.18 专程打卡了麦当劳特惠，花费了 <strong>$2.99</strong>。
                   </p>
                 </div>
               </div>
@@ -1239,7 +1530,7 @@ export default function App() {
                 <h2 className="insight-title" style={{ color: '#047857' }}>超市采购大战 (Groceries Battle)</h2>
               </div>
               <div className="insight-body">
-                在美留学期间，采购食材自己做饭是节省开销的重要手段。您经常光顾的各大超市消费分布如下：
+                采购食材自己做饭是节省开销的重要手段。账单中经常光顾的各大超市消费分布如下：
               </div>
             </div>
 
@@ -1295,7 +1586,7 @@ export default function App() {
                 <h2 className="insight-title" style={{ color: '#6d28d9' }}>旅行专题对账 (Travel Insights)</h2>
               </div>
               <div className="insight-body">
-                在学期空闲和毕业期间，您组织了多次精彩的旅行。由于旅行费用大多由您<strong>垫付酒店或门票</strong>后统一回款，在此我们帮您计算了每次出行的<strong>总支出、回款金额和真实个人自付开销</strong>：
+                多次旅行支出的垫付总额、同伴回款和个人真实自付净开支明细：
               </div>
             </div>
 
@@ -1313,21 +1604,21 @@ export default function App() {
                       <span className="insight-metric-label">垫付总开支 (Gross Cost)</span>
                       <span className="insight-metric-val" style={{ fontSize: '1.5rem', color: 'var(--danger)' }}>{formatRMB(t.grossCost)}</span>
                       <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
-                        包含您为同伴统一订购的酒店、门票等
+                        统一代付订购的酒店、门票、机票总和
                       </p>
                     </div>
                     <div className="insight-metric-item" style={{ textAlign: 'left', padding: '1rem' }}>
                       <span className="insight-metric-label">同伴回款/均摊 (Split Recieved)</span>
                       <span className="insight-metric-val" style={{ fontSize: '1.5rem', color: 'var(--info)' }}>{formatRMB(t.reimbursement)}</span>
                       <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
-                        同伴均摊汇入的账款与航空公司退款
+                        同伴汇入的AA款及退票款等
                       </p>
                     </div>
                     <div className="insight-metric-item" style={{ textAlign: 'left', padding: '1rem', gridColumn: 'span 2' }}>
                       <span className="insight-metric-label">您的真实自付净额 (Real Net Cost)</span>
                       <span className="insight-metric-val" style={{ fontSize: '1.75rem', color: 'var(--primary)' }}>{formatRMB(t.netCost)}</span>
                       <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
-                        扣除回款后，本次旅行中您个人的实际机票、餐饮及娱乐支出
+                        扣除回款后，您个人在此次出行中的实际支出
                       </p>
                     </div>
                   </div>

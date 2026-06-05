@@ -1,6 +1,6 @@
 # 📊 CostAnalytics - 留学记账数据挖掘与可视化仪表板
 
-> 一个专为留学生量身定制的、高颜值且支持本地账单脱机分析的开源记账可视化仪表板。  
+> 一个支持本地账单脱机分析的记账可视化仪表板。  
 > **Copyright © 2026 Shimmer. All Rights Reserved. (版权属 Shimmer 所有)**
 
 ---

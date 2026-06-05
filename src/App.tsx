@@ -345,17 +345,17 @@ export default function App() {
   };
 
   const handleDownloadTemplate = () => {
-    const headers = '日期,美元,人民币,月均汇率,合计,备注\n';
-    const rows = [
-      '-,$58,785.66,$44,426.83,（$1兑￥1）,$459,872.79,汇总行(可选)\n',
-      '2025/5/16,$350.00,,7.22,$2527.00,签证SEVIS-901材料费\n',
-      '2025/5/16,,¥6211.00,7.22,¥6211.00,北京-迪拜-华盛顿机票+航空意外险\n',
-      '2025/8/9,$20,958.50,¥1,000.00,7.17,¥151272.45,25-26 Fall学费\n',
-      '2025/8/26,$4.27,,7.17,¥30.62,麦当劳点单\n',
-      '2025/9/8,$552.28,,7.12,¥3932.23,9-10月房租\n',
-      '2026/1/16,-$42.70,,6.97,-¥297.62,TA工资\n'
-    ];
-    const blob = new Blob([headers + rows.join('')], { type: 'text/csv;charset=utf-8;' });
+    const csvContent = 
+      "\uFEFF" +
+      "日期,美元,人民币,月均汇率,合计,备注\n" +
+      "-,,,（$1兑￥1）,=sum(B3:B100),\n" +
+      "2025/5/16,,,7.22,,\n" +
+      "2025/5/16,,,7.22,,\n" +
+      "2025/8/9,,,¥1,,\n" +
+      "2025/8/26,,,7.17,,\n" +
+      "2025/9/8,,,7.12,,\n" +
+      "2026/1/16,,,6.97,,\n";
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
